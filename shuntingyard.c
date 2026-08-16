@@ -33,8 +33,9 @@ int main()
 {
 	int token_len = 0;
 	int postfix_len = 0;
-	int rc = 0;
+	int result = 0;
 	int paren_count = 0;
+	int ret = -EINVAL;
 	Token *tokens = NULL, *postfix = NULL;
 	size_t bufsize = 0;
 	char *expr = NULL;
@@ -57,22 +58,17 @@ int main()
 		goto err_inval;
 	print_tokens_debug(postfix, postfix_len);
 
-	int res = eval(postfix, postfix_len, &rc);
-
-	if (rc != 0)
+	if (eval(postfix, postfix_len, &result) != 0)
 		goto err_inval;
 
-	printf("%d\n", res);
+	printf("%d\n", result);
+	ret = 0;
 
-	free(expr);
-	free(tokens);
-	free(postfix);
-	return 0;
 err_inval:
 	free(expr);
 	free(tokens);
 	free(postfix);
-	return -EINVAL;
+	return ret;
 }
 
 void print_tokens_debug(const Token *token_arr, const int token_len)
@@ -297,12 +293,11 @@ err_alloc:
 	return NULL;
 }
 
-int eval(Token *postfix, int len, int *rc)
+int eval(Token *postfix, int len, int *result)
 {
 	TokenStack st;
 	Token *token_arr = (Token *)malloc(sizeof(Token) * len);
 	int i = 0;
-	int rv = 0;
 	Token t;
 
 	if (!token_arr)
@@ -382,14 +377,13 @@ int eval(Token *postfix, int len, int *rc)
 	if (Token_stack_empty(&st) || Token_stack_size(&st) > 1)
 		goto err_inval;
 
-	*rc = 0;
-	rv = Token_stack_top(&st)->num;
+	*result = Token_stack_top(&st)->num;
 	Token_stack_free(&st);
-	return rv;
+	return 0;
 
 err_inval:
 err_alloc:
-	*rc = -1;
+	*result = 0;
 	free(token_arr);
-	return 0;
+	return -EINVAL;
 }
