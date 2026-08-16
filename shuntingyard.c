@@ -26,8 +26,17 @@ void print_tokens_debug(const Token *, const int);
 int precedence(char, int);
 int eval(Token *, int, int *);
 
-Token *tokenize(const char *, int, int *, int *);
-Token *shunting_yard(const Token *, int, int, int *);
+static inline int precedence_comp(Token, Token, int, int);
+static inline int precedence_comp(Token t, Token top, int t_is_unary,
+				  int t_is_right_assoc)
+{
+	int top_is_unary = top.type == TOKEN_UNARY_MINUS ||
+			   top.type == TOKEN_UNARY_PLUS;
+	return precedence(t.op, top_is_unary) + t_is_right_assoc <=
+	       precedence(top.op, top_is_unary);
+}
+int tokenize(const char *, const int, int *, int *, Token **);
+int shunting_yard(const Token *, int, int, int *, Token **);
 
 int main()
 {
@@ -35,39 +44,44 @@ int main()
 	int postfix_len = 0;
 	int result = 0;
 	int paren_count = 0;
-	int ret = -EINVAL;
+	int ret = 0;
 	Token *tokens = NULL, *postfix = NULL;
 	size_t bufsize = 0;
 	char *expr = NULL;
 	ssize_t nread = getline(&expr, &bufsize, stdin);
 
-	if (nread == -1)
-		goto err_inval;
+	if (nread == -1) {
+		ret = -EINVAL;
+		goto err_get_input;
+	}
 
 	if (nread > 0 && expr[nread - 1] == '\n') {
 		expr[nread - 1] = '\0';
 		nread--;
 	}
-	tokens = tokenize(expr, nread, &token_len, &paren_count);
-	if (!tokens)
-		goto err_inval;
-	print_tokens_debug(tokens, token_len);
-	postfix = shunting_yard(tokens, token_len, paren_count, &postfix_len);
 
-	if (!postfix)
-		goto err_inval;
+	if ((ret = tokenize(expr, nread, &token_len, &paren_count, &tokens)) !=
+	    0)
+		goto err_tokenize;
+	print_tokens_debug(tokens, token_len);
+
+	if ((ret = shunting_yard(tokens, token_len, paren_count, &postfix_len,
+				 &postfix)) != 0)
+		goto err_shuntingyard;
 	print_tokens_debug(postfix, postfix_len);
 
-	if (eval(postfix, postfix_len, &result) != 0)
-		goto err_inval;
+	if ((ret = eval(postfix, postfix_len, &result)) != 0)
+		goto err_eval;
 
 	printf("%d\n", result);
-	ret = 0;
 
-err_inval:
-	free(expr);
-	free(tokens);
+err_eval:
+err_shuntingyard:
 	free(postfix);
+err_tokenize:
+	free(tokens);
+err_get_input:
+	free(expr);
 	return ret;
 }
 
@@ -84,11 +98,11 @@ void print_tokens_debug(const Token *token_arr, const int token_len)
 			       t.num);
 			break;
 		case TOKEN_OPERATOR:
-			printf("Token #%d: (type, val) = (opeator, '%c')", i,
+			printf("Token #%d: (type, val) = (operator, '%c')", i,
 			       t.op);
 			break;
 		case TOKEN_PAREN:
-			printf("Token #%d: (type, val) = (paraenthesis, '%c')",
+			printf("Token #%d: (type, val) = (parenthesis, '%c')",
 			       i, t.op);
 			break;
 		case TOKEN_UNARY_MINUS:
@@ -105,7 +119,8 @@ void print_tokens_debug(const Token *token_arr, const int token_len)
 	printf("----\n");
 #endif
 }
-Token *tokenize(const char *expr, int len, int *token_len, int *paren_count)
+int tokenize(const char *expr, const int len, int *token_len, int *paren_count,
+	     Token **result)
 {
 	Token *token_arr = (Token *)malloc(sizeof(Token) * len);
 	int i = 0;
@@ -113,8 +128,11 @@ Token *tokenize(const char *expr, int len, int *token_len, int *paren_count)
 	int ptr = 0;
 	int state = 0;
 	int parens = 0;
-	if (!token_arr)
+	int rc = 0;
+	if (!token_arr) {
+		rc = -ENOMEM;
 		goto err_alloc;
+	}
 
 	for (; i < len; ++i) {
 		char ch = expr[i];
@@ -144,6 +162,7 @@ Token *tokenize(const char *expr, int len, int *token_len, int *paren_count)
 			parens++;
 			ptr++;
 		} else {
+			rc = -EINVAL;
 			goto err_inval;
 		}
 	}
@@ -154,12 +173,13 @@ Token *tokenize(const char *expr, int len, int *token_len, int *paren_count)
 	}
 	*token_len = ptr;
 	*paren_count = parens;
-	return token_arr;
+	*result = token_arr;
+	return 0;
 
 err_inval:
 err_alloc:
 	free(token_arr);
-	return NULL;
+	return rc;
 }
 int precedence(char op, int is_unary)
 {
@@ -182,26 +202,29 @@ int precedence(char op, int is_unary)
 	}
 }
 
-Token *shunting_yard(const Token *infix, int tokens_len, int paren_count,
-		     int *postfix_len)
+int shunting_yard(const Token *infix, int tokens_len, int paren_count,
+		  int *postfix_len, Token **result)
 {
-	int i;
-	Token *token_arr;
-	Token *postfix;
-	TokenStack st;
+	int i = 0;
 	int postfix_ptr = 0;
 	int expect_opnd = 1;
+	int rc = 0;
+	Token *token_arr = NULL;
+	Token *postfix = NULL;
 	Token t;
+	TokenStack st;
 
 	token_arr = (Token *)malloc(sizeof(Token) * tokens_len);
 	postfix = (Token *)malloc(sizeof(Token) * (tokens_len - paren_count));
 
-	if (!token_arr || !postfix)
+	if (!token_arr || !postfix) {
+		rc = -ENOMEM;
 		goto err_alloc;
+	}
 
 	Token_stack_init(&st, token_arr, tokens_len);
 
-	for (i = 0; i < tokens_len; ++i) {
+	for (; i < tokens_len; ++i) {
 		t = infix[i];
 		switch (t.type) {
 		case TOKEN_OPERAND: {
@@ -210,12 +233,11 @@ Token *shunting_yard(const Token *infix, int tokens_len, int paren_count,
 			break;
 		}
 		case TOKEN_OPERATOR: {
-			int cur_uny = expect_opnd &&
-				      (t.op == '+' || t.op == '-');
+			int t_uny = expect_opnd && (t.op == '+' || t.op == '-');
 			Token *top;
-			int is_right_assoc = t.op == '^' || cur_uny;
+			int is_r_assoc = t.op == '^' || t_uny;
 
-			if (cur_uny)
+			if (t_uny)
 				t.type = ((t.op == '+') ? TOKEN_UNARY_PLUS :
 							  TOKEN_UNARY_MINUS);
 
@@ -226,28 +248,27 @@ Token *shunting_yard(const Token *infix, int tokens_len, int paren_count,
 
 			while ((top = Token_stack_top(&st)) &&
 			       top->type != TOKEN_PAREN &&
-			       precedence(t.op, cur_uny) + is_right_assoc <=
-				       precedence(
-					       top->op,
-					       top->type == TOKEN_UNARY_MINUS ||
-						       top->type ==
-							       TOKEN_UNARY_PLUS)) {
+			       precedence_comp(t, *top, t_uny, is_r_assoc)) {
 				Token popped;
 				// Already checked if top is NULL, so this will always return 0
 				(void)Token_stack_pop(&st, &popped);
 				postfix[postfix_ptr++] = popped;
 			}
 
-			if (Token_stack_push(&st, t) == -1)
+			if (Token_stack_push(&st, t) == -1) {
+				rc = -EINVAL;
 				goto err_inval;
+			}
 
 			expect_opnd = 1;
 			break;
 		}
 		case TOKEN_PAREN: {
 			if (t.op == '(') {
-				if (Token_stack_push(&st, t) == -1)
+				if (Token_stack_push(&st, t) == -1) {
+					rc = -EINVAL;
 					goto err_inval;
+				}
 				expect_opnd = 1;
 			} else {
 				Token popped;
@@ -260,8 +281,10 @@ Token *shunting_yard(const Token *infix, int tokens_len, int paren_count,
 					}
 					postfix[postfix_ptr++] = popped;
 				}
-				if (!found_match)
+				if (!found_match) {
+					rc = -EINVAL;
 					goto err_inval;
+				}
 
 				expect_opnd = 0;
 			}
@@ -276,21 +299,24 @@ Token *shunting_yard(const Token *infix, int tokens_len, int paren_count,
 	}
 	Token remaining;
 	while (Token_stack_pop(&st, &remaining) == 0) {
-		if (remaining.type == TOKEN_PAREN && remaining.op == '(')
+		if (remaining.type == TOKEN_PAREN && remaining.op == '(') {
 			// There is unmatched paraenthesis
+			rc = -EINVAL;
 			goto err_inval;
+		}
 		postfix[postfix_ptr++] = remaining;
 	}
 
 	*postfix_len = postfix_ptr;
-	free(token_arr);
-	return postfix;
+	*result = postfix;
 
 err_inval:
 err_alloc:
-	free(postfix);
+	if (rc != 0)
+		free(postfix);
+
 	free(token_arr);
-	return NULL;
+	return rc;
 }
 
 int eval(Token *postfix, int len, int *result)
